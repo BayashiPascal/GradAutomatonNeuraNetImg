@@ -44,3 +44,6 @@ main.o: main.c Makefile
 
 clean:
 	rm -f *.o main
+
+runTest01:
+	main -encode test01.tga -verbose
