@@ -6,24 +6,37 @@
 #include "genalg.h"
 
 // Nb of step between each save of the GenAlg
-// Saving it allows to restart a stop learning process but is 
+// Saving it allows to restart a stop learning process but is
 // very time consuming if there are many input/hidden/output
 // If 0 never save
 #define SAVE_GA_EVERY 0
+
 // Size of the gene pool and elite pool
-#define ADN_SIZE_POOL 100
-#define ADN_SIZE_ELITE 20
+#define ADN_SIZE_POOL 20
+#define ADN_SIZE_ELITE 10
+
 // Diversity threshold for KT event in GenAlg
 #define DIVERSITY_THRESHOLD 0.00001
+
 // Initial best value during learning, must be lower than any
 // possible value returned by GANNIEvaluate()
 #define INIT_BEST_VAL -10000.0
+
 // Value of the NeuraNet above which the learning process stops
-#define STOP_LEARNING_AT_VAL -0.01
+// In percentage of similarity
+#define STOP_LEARNING_AT_VAL 0.99
+
 // Number of epoch above which the learning process stops
 #define STOP_LEARNING_AT_EPOCH 100000
+
 // Save NeuraNet in compact format
 #define COMPACT true
+
+// Flag to display the TextOMeter
+#define FLAG_TEXTOMETER true
+
+// Number of dimensions in addition to the RGBA
+#define STATUS_EXTRA_DIM 2
 
 // ------------- GradAutomatonNeuraNetImg
 
@@ -54,6 +67,17 @@ typedef struct GANNI {
 
   // Number of hidden layers in the NeuraNet
   long nbHiddenLayers;
+
+  // GradAutomatonNeuraNet used to encode/decode
+  GradAutomatonNeuraNet* gann;
+
+  // Target/result GenBrush
+  GenBrush* gb;
+
+  // Path to the result of encoding
+  char* outputPath;
+
+int i;
 
 } GANNI;
 
@@ -125,25 +149,22 @@ bool GANNIProcessArg(
 // Run the encoding process for the GANNI 'that'
 void GANNIEncode(GANNI* const that);
 
-// Train the NeuraNet of the GradAutomatonNeuraNet 'gann'
-// for the GANNI 'that' on the GenBrush 'gb'
-void GANNITrain(
-                  GANNI* const that,
-  GradAutomatonNeuraNet* const gann,
-               GenBrush* const gb);
+// Train the NeuraNet of the GradAutomatonNeuraNet 'that->grad'
+// of the GANNI 'that' on the GenBrush 'that->gb'
+void GANNITrain(GANNI* const that);
 
 // Run the decoding process for the GANNI 'that'
 void GANNIDecode(GANNI* const that);
 
+// Return the similarity of the GenBrush produced by the
+// GradAutomatonNeuraNet of 'that' with the GenBrush of 'that'
 float GANNIEvaluate(
                   GANNI* const that,
-  GradAutomatonNeuraNet* const gann,
-               GenBrush* const gb,
                    const float curWorstVal);
 
-GenBrush* GANNI2GB(
-                  GANNI* const that,
-  GradAutomatonNeuraNet* const gann);
+// Return the image produced by the GradAutomatonNeuraNet of 'that'
+// as a GenBrush
+GenBrush* GANNI2GB(GANNI* const that);
 
 // ================ Functions implementation ====================
 
@@ -157,8 +178,11 @@ GANNI GANNICreateStatic(void) {
   that.mode = GANNInothing;
   that.path = NULL;
   that.verbose = false;
-  that.dimStatus = 5;
+  that.dimStatus = 4 + STATUS_EXTRA_DIM;
   that.nbHiddenLayers = 1;
+  that.gann = NULL;
+  that.gb = NULL;
+  that.outputPath = NULL;
 
   // Return the new GANNI
   return that;
@@ -457,9 +481,9 @@ bool GANNIProcessArg(
 void GANNIEncode(GANNI* const that) {
 
   // Open the image
-  GenBrush* gb = GBCreateFromFile(GANNIPath(that));
+  that->gb = GBCreateFromFile(GANNIPath(that));
 
-  if (gb == NULL) {
+  if (that->gb == NULL) {
 
     printf(
       "Could not open the image [%s]\n",
@@ -478,8 +502,22 @@ void GANNIEncode(GANNI* const that) {
 
   }
 
+  // Create the path for the output GANNI file
+  that->outputPath = strdup(GANNIPath(that));
+  size_t length = strlen(that->outputPath);
+  that->outputPath[length - 3] = 'g';
+  that->outputPath[length - 2] = 'n';
+  that->outputPath[length - 1] = 'i';
+  if (GANNIGetVerbose(that) == true) {
+
+    printf(
+      "Saving to [%s]\n",
+      that->outputPath);
+
+  }
+
   // Get the dimension of the image
-  VecShort2D* dimImg = GBDim(gb);
+  VecShort2D* dimImg = GBDim(that->gb);
   if (GANNIGetVerbose(that) == true) {
 
     printf("Image dimensions: ");
@@ -492,7 +530,7 @@ void GANNIEncode(GANNI* const that) {
 
   // Create the GradAutomatonNeuraNet
   bool diagLink = true;
-  GradAutomatonNeuraNet* gann =
+  that->gann =
     GradAutomatonCreateNeuraNetSquare(
       GANNIGetDimStatus(that),
       dimImg,
@@ -500,14 +538,12 @@ void GANNIEncode(GANNI* const that) {
       GANNIGetNbHiddenLayers(that));
 
   // Train the NeuraNet
-  GANNITrain(
-    that,
-    gann,
-    gb);
+  GANNITrain(that);
 
   // Free memory
-  GradAutomatonNeuraNetFree(&gann);
-  GBFree(&gb);
+  free(that->outputPath);
+  GradAutomatonNeuraNetFree(&(that->gann));
+  GBFree(&(that->gb));
 
   // Display a message for the user
   if (GANNIGetVerbose(that) == true) {
@@ -518,91 +554,272 @@ void GANNIEncode(GANNI* const that) {
 
 }
 
-GenBrush* GANNI2GB(
-                  GANNI* const that,
-  GradAutomatonNeuraNet* const gann) {
+// Return the image produced by the GradAutomatonNeuraNet of 'that'
+// as a GenBrush
+GenBrush* GANNI2GB(GANNI* const that) {
 
-  // Reset the Grad data
+  // Declare a variable to memorize the dimension of the Grad
+  const VecShort2D* dim =
+    GradDim(GradAutomatonGrad(that->gann));
+
+  // Declare a variable to memorize the position at the center of the
+  // Grad
+  VecShort2D posCenter =
+    VecShortCreateStatic2D();
+  for (
+    int iDim = 2;
+    iDim--;) {
+
+    short v =
+      VecGet(
+        dim,
+        iDim);
+
+    VecSet(
+      &posCenter,
+      iDim,
+      v / 2);
+
+    }
+
+  // Loop on the cell of the Grad
+  VecShort2D pos =
+    VecShortCreateStatic2D();
+  bool flagStep = true;
+  do {
+
+    // Get the current and previous status of the cell
+    // at the current position
+    GrACellFloat* cell =
+      GradAutomatonCell(
+        that->gann,
+        &pos);
+    VecFloat* prevStatus =
+      GrACellPrevStatus(cell);
+    VecFloat* curStatus =
+      GrACellCurStatus(cell);
+
+    // Declare a variable to memorize the initial rgba values of the
+    // status, by default transparent black
+    float val = 0.0;
+
+    // If the cell is at the center
+    bool isAtCenter =
+      VecIsEqual(
+        &pos,
+        &posCenter);
+    if (isAtCenter == true) {
+
+      // By default the rgba value of the center pixel is opaque white
+      val = 1.0;
+
+    }
+
+    // Set the values of the previous status of the cell
+    // The values of the extra dimensions are set by default to the
+    // same values as the rgba of the cell
+    for (
+      int iDim = VecGetDim(curStatus);
+      iDim--;) {
+
+      VecSet(
+        prevStatus,
+        iDim,
+        val);
+      VecSet(
+        curStatus,
+        iDim,
+        val);
+
+    }
+
+    // Step to the next cell
+    flagStep =
+      VecStep(
+        &pos,
+        dim);
+
+  } while (flagStep);
 
   // Calculate the maximum nb of steps to reach stability
-  long nbMaxStep = 1;
+  // It is the maximum dimension of the Grad of gann
+  long nbMaxStep = VecGetMaxVal(dim);
 
   // Step the GradAutomaton until stability or maximum nb of steps is
   // reached
   long iStep = 0;
-  bool stable = false;
   do {
 
     // Step the GradAutomaton
-    GradAutomatonStep(gann);
-
-    // Reset the stability flag
-    //stable = true;
-
-    // Check the stability
+    GradAutomatonStep(that->gann);
 
     // Increment the nb of steps
     ++iStep;
 
   } while (
-    stable == false ||
+    GradAutomatonIsStable(that->gann) == false &&
     iStep < nbMaxStep);
 
-  // Convert the Grad data into a GenBrush
+  // Create the result GenBrush
+  GenBrush* gb = GBCreateImage(dim);
+
+  // Loop on the cell of the Grad to convert it into a GenBrush
+  VecSetNull(&pos);
+  do {
+
+    // Get the current status of the cell at the current position
+    GrACellFloat* cell =
+      GradAutomatonCell(
+        that->gann,
+        &pos);
+    VecFloat* status = GrACellCurStatus(cell);
+
+    // Declare a GBPixel to do the conversion
+    GBPixel pixel;
+
+    // Convert the values of the current status of the cell
+    // into pixel values
+    for (
+      int iDim = 4;
+      iDim--;) {
+
+      float val =
+        VecGet(
+          status,
+          iDim);
+      val =
+        MIN(
+          255.99,
+          MAX(
+            0.0,
+            val));
+      pixel._rgba[iDim] = (unsigned char)val;
+
+    }
+
+    // Update the pixel in the GenBrush
+    GBSetFinalPixel(
+      gb,
+      &pos,
+      &pixel);
+
+    // Step to the next cell
+    flagStep =
+      VecStep(
+        &pos,
+        dim);
+
+  } while (flagStep);
 
   // Return the GenBrush
-  return NULL;
+  return gb;
 
 }
 
+// Return the similarity of the GenBrush produced by the
+// GradAutomatonNeuraNet of 'that' with the GenBrush of 'that'
 float GANNIEvaluate(
-                  GANNI* const that,
-  GradAutomatonNeuraNet* const gann,
-               GenBrush* const gb,
-                   const float curWorstVal) {
+  GANNI* const that,
+   const float curWorstVal) {
 
+  // Can't use the current worst val to optimize in the case of GANNI
   (void)curWorstVal;
 
   // Create the GenBrush from the GradAutomaton
-  GenBrush* gbGrA =
-    GANNI2GB(
-      that,
-      gann);
+  GenBrush* gbGrA = GANNI2GB(that);
 
   // Compare the GenBrush to the learnt one
-  float similarity =
+  /*float similarity =
     GBGetSimilarity(
-      gb,
-      gbGrA);
+      that->gb,
+      gbGrA);*/
 
-  // Correct the similiarity with the area to avoid small differences
-  // to be wiped out by test against EPSILON
-  similarity *= (float)GBArea(gb);
+  // Declare a variable to memorize the dimension of the Grad
+  const VecShort2D* dim =
+    GradDim(GradAutomatonGrad(that->gann));
+
+  // Declare a variable to memorize the number of identic pixels
+  float nbSamePix = 0.0;
+
+  // Loop on the pixels
+  VecShort2D pos =
+    VecShortCreateStatic2D();
+  bool flagStep = true;
+  do {
+
+    // Declare a GBPixel to do the conversion
+    GBPixel pixelGB =
+      GBGetFinalPixel(
+        that->gb,
+        &pos);
+    GBPixel pixelGBGrA =
+      GBGetFinalPixel(
+        gbGrA,
+        &pos);
+
+    // Compare the pixels
+    bool flagSame = true;
+    for (
+      int iDim = 4;
+      iDim-- && flagSame == true;) {
+
+      if (pixelGB._rgba[iDim] != pixelGBGrA._rgba[iDim]) {
+
+        flagSame = false;
+
+      }
+
+    }
+
+    // Update the number of identic pixels
+    if (flagSame == true) {
+
+      nbSamePix += 1.0;
+
+    }
+
+    // Step to the next cell
+    flagStep =
+      VecStep(
+        &pos,
+        dim);
+
+  } while (flagStep);
+
+  // Calculate the similarity
+  float similarity = nbSamePix / (float)GBArea(that->gb);
+
+//if (similarity > curWorstVal) {
+char fn[17];
+sprintf(fn,"./ganni2gb%02d.tga",that->i);
+GBSetFileName(gbGrA, fn);
+GBRender(gbGrA);
+//}
 
   // Return the result of evaluation
   return similarity;
 
 }
 
-// Train the NeuraNet of the GradAutomatonNeuraNet 'gann'
-// for the GANNI 'that' on the GenBrush 'gb'
-void GANNITrain(
-                  GANNI* const that,
-  GradAutomatonNeuraNet* const gann,
-               GenBrush* const gb) {
+// Train the NeuraNet of the GradAutomatonNeuraNet 'that->grad'
+// of the GANNI 'that' on the GenBrush 'that->gb'
+void GANNITrain(GANNI* const that) {
 
   // Init the random generator
   srandom(time(NULL));
 
   // Declare variables to measure time
-  struct timespec start, stop;
+  struct timespec start;
+  struct timespec stop;
 
   // Start measuring time
-  clock_gettime(CLOCK_REALTIME, &start);
+  clock_gettime(
+    CLOCK_REALTIME,
+    &start);
 
   // Get a reference to the NeuraNet of the gann
   NeuraNet* nn =
-    GrAFunNeuraNetNN((GrAFunNeuraNet*)GradAutomatonFun(gann));
+    GrAFunNeuraNetNN((GrAFunNeuraNet*)GradAutomatonFun(that->gann));
 
   // Declare a variable to memorize the best value
   float bestVal = INIT_BEST_VAL;
@@ -614,7 +831,7 @@ void GANNITrain(
   GenAlg* ga =
     GenAlgCreate(
       ADN_SIZE_POOL,
-      ADN_SIZE_ELITE, 
+      ADN_SIZE_ELITE,
       NNGetGAAdnFloatLength(nn),
       NNGetGAAdnIntLength(nn));
   NNSetGABoundsBases(
@@ -634,18 +851,19 @@ void GANNITrain(
   GASetDiversityThreshold(
     ga,
     DIVERSITY_THRESHOLD);
-
+  GAInit(ga);
+  
   GASetTextOMeterFlag(
     ga,
-    true);
+    FLAG_TEXTOMETER);
 
   // Start learning process
   if (GANNIGetVerbose(that) == true) {
 
     printf("Learning...\n");
     printf("Will stop when curEpoch >= %lu or bestVal >= %f\n",
-      limitEpoch, STOP_LEARNING_AT_VAL);
-    printf("Will save the best NeuraNet in ./bestnn.txt at each improvement\n");
+      limitEpoch,
+      STOP_LEARNING_AT_VAL);
     fflush(stdout);
 
   }
@@ -660,7 +878,7 @@ void GANNITrain(
 
   // Learning loop
   while (
-    bestVal < STOP_LEARNING_AT_VAL && 
+    bestVal < STOP_LEARNING_AT_VAL &&
     GAGetCurEpoch(ga) < limitEpoch) {
 
     curWorst = curBest;
@@ -700,11 +918,10 @@ void GANNITrain(
       }
 
       // Evaluate the NeuraNet
+that->i=iEnt;
       float value =
         GANNIEvaluate(
           that,
-          gann,
-          gb,
           curWorstElite);
 
       // Update the value of this adn
@@ -737,7 +954,9 @@ void GANNITrain(
     curWorstElite = GAAdnGetVal(worstEliteAdn);
 
     // Measure time
-    clock_gettime(CLOCK_REALTIME, &stop);
+    clock_gettime(
+      CLOCK_REALTIME,
+      &stop);
     float elapsed = stop.tv_sec - start.tv_sec;
     int day = (int)floor(elapsed / 86400);
     elapsed -= (float)(day * 86400);
@@ -757,7 +976,7 @@ void GANNITrain(
 
         printf(
           "Improvement at epoch %05lu: %f(%03d) (in " \
-          "%02d:%02d:%02d:%02ds)       \n", 
+          "%02d:%02d:%02d:%02ds)       \n",
           GAGetCurEpoch(ga),
           bestVal,
           curBestI,
@@ -777,25 +996,27 @@ void GANNITrain(
           curBestI);
       if (GAAdnAdnF(bestAdn) != NULL) {
 
-        NNSetBases(nn, GAAdnAdnF(bestAdn));
+        NNSetBases(
+          nn,
+          GAAdnAdnF(bestAdn));
 
       }
 
-      // Save the best NeuraNet
+      // Save the best GradAutomatonNeuraNet
       FILE* fd =
         fopen(
-          "./bestnn.txt",
+          that->outputPath,
           "w");
       bool retSave =
-        NNSave(
-          nn,
+        GradAutomatonSave(
+          that->gann,
           fd,
           COMPACT);
       if (retSave == false) {
 
         fprintf(
           stderr,
-          "Couldn't save the NeuraNet\n");
+          "Couldn't save the GradAutomatonNeuraNet\n");
         exit(1);
 
       }
@@ -806,14 +1027,19 @@ void GANNITrain(
 
       if (GANNIGetVerbose(that) == true) {
 
+        GenAlgAdn* firstAdn =
+          GAAdn(
+            ga,
+            0);
+
         printf(
-          "Epoch %05lu: v%f a%03lu kt%03lu ", 
+          "Epoch %05lu: v%f a%03lu kt%03lu ",
           GAGetCurEpoch(ga),
-          GAAdnGetVal(GAAdn(ga, 0)),
-          GAAdnGetAge(GAAdn(ga, 0)),
+          GAAdnGetVal(firstAdn),
+          GAAdnGetAge(firstAdn),
           GAGetNbKTEvent(ga));
         printf(
-          "(in %02d:%02d:%02d:%02ds)  \r", 
+          "(in %02d:%02d:%02d:%02ds)  \r",
           day,
           hour,
           min,
@@ -830,6 +1056,7 @@ void GANNITrain(
       delaySave >= SAVE_GA_EVERY) {
 
       delaySave = 0;
+
       // Save the adns of the GenAlg, use a temporary file to avoid
       // loosing the previous one if something goes wrong during
       // writing, then replace the previous file with the temporary one
@@ -864,7 +1091,9 @@ void GANNITrain(
   }
 
   // Measure time
-  clock_gettime(CLOCK_REALTIME, &stop);
+  clock_gettime(
+    CLOCK_REALTIME,
+    &stop);
   float elapsed = stop.tv_sec - start.tv_sec;
   int day = (int)floor(elapsed / 86400);
   elapsed -= (float)(day * 86400);
@@ -876,7 +1105,7 @@ void GANNITrain(
   if (GANNIGetVerbose(that) == true) {
 
     printf(
-      "\nLearning complete (in %d:%d:%d:%ds)\n", 
+      "\nLearning complete (in %d:%d:%d:%ds)\n",
       day,
       hour,
       min,
@@ -893,7 +1122,58 @@ void GANNITrain(
 // Run the decoding process for the GANNI 'that'
 void GANNIDecode(GANNI* const that) {
 
-  (void)that;
+  if (GANNIGetVerbose(that) == true) {
+
+    printf(
+      "Decoding [%s]\n",
+      GANNIPath(that));
+
+  }
+
+  // Load the GradAutomatonNeuraNet
+  FILE* fd =
+    fopen(
+      GANNIPath(that),
+      "r");
+  bool retLoad =
+    GradAutomatonLoad(
+      &(that->gann),
+      fd);
+  if (retLoad == false) {
+
+    fprintf(
+      stderr,
+      "Couldn't load the GradAutomatonNeuraNet\n");
+    exit(1);
+
+  }
+
+  // Create the GenBrush
+  GenBrush* gb = GANNI2GB(that);
+
+  // Create the output path
+  that->outputPath = strdup(GANNIPath(that));
+  size_t length = strlen(that->outputPath);
+  that->outputPath[length - 3] = 't';
+  that->outputPath[length - 2] = 'g';
+  that->outputPath[length - 1] = 'a';
+  if (GANNIGetVerbose(that) == true) {
+
+    printf(
+      "Saving to [%s]\n",
+      that->outputPath);
+
+  }
+
+  // Render the GenBrush ot the file
+  GBSetFileName(
+    gb,
+    that->outputPath);
+  GBRender(gb);
+
+  // Free memory
+  free(that->outputPath);
+  GBFree(&gb);
 
 }
 

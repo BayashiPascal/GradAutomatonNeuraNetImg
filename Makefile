@@ -2,7 +2,7 @@
 # 0: development (max safety, no optimisation)
 # 1: release (min safety, optimisation)
 
-BUILD_MODE?=0
+BUILD_MODE?=1
 
 # Path to PBMake
 
@@ -45,5 +45,8 @@ main.o: main.c Makefile
 clean:
 	rm -f *.o main
 
-runTest01:
+encodeTest01:
 	main -encode test01.tga -verbose
+
+decodeTest:
+	main -decode test.gni -verbose
